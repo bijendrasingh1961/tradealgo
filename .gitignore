@@ -1,0 +1,17 @@
+# .NET
+**/bin/
+**/obj/
+
+# Node
+**/node_modules/
+**/dist/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.user
+
+# Env
+.env
+.env.local
