@@ -45,6 +45,10 @@ namespace KiteNiftyStrategy
         private static string _ceSLOrderId = string.Empty;
         private static string _peSLOrderId = string.Empty;
 
+        // Tracking symbols to only square off what we opened
+        private static string _ceSymbol = string.Empty;
+        private static string _peSymbol = string.Empty;
+
         /// <summary>
         /// Entry point of the application.
         /// </summary>
@@ -74,28 +78,28 @@ namespace KiteNiftyStrategy
                 Console.WriteLine($"Detected Current Week Expiry: {currentWeekExpiry:yyyy-MM-dd}");
 
                 // Identify the exact trading symbols from Kite's master list
-                string ceSymbol = FindSymbol(instruments, ceStrike, "CE", currentWeekExpiry);
-                string peSymbol = FindSymbol(instruments, peStrike, "PE", currentWeekExpiry);
+                _ceSymbol = FindSymbol(instruments, ceStrike, "CE", currentWeekExpiry);
+                _peSymbol = FindSymbol(instruments, peStrike, "PE", currentWeekExpiry);
 
-                if (string.IsNullOrEmpty(ceSymbol) || string.IsNullOrEmpty(peSymbol))
+                if (string.IsNullOrEmpty(_ceSymbol) || string.IsNullOrEmpty(_peSymbol))
                 {
                     Console.WriteLine("Error: Could not find matching instruments for the given strikes and expiry.");
                     return;
                 }
 
-                Console.WriteLine($"Trading CE: {ceSymbol}");
-                Console.WriteLine($"Trading PE: {peSymbol}");
+                Console.WriteLine($"Trading CE: {_ceSymbol}");
+                Console.WriteLine($"Trading PE: {_peSymbol}");
 
                 // 4. Wait until the scheduled start time (9:30 AM)
                 WaitUntilTime(new TimeSpan(9, 30, 0));
 
                 // 5. Execute initial Sell Market orders
-                ExecuteStrategy(ceSymbol, peSymbol);
+                ExecuteStrategy(_ceSymbol, _peSymbol);
 
                 // 6. Monitor positions until square-off time (3:20 PM)
                 Console.WriteLine("\n[Monitoring]");
                 Console.WriteLine("Monitoring for SL hits or 3:20 PM square-off...");
-                MonitorPositions(ceSymbol, peSymbol);
+                MonitorPositions(_ceSymbol, _peSymbol);
             }
             catch (Exception ex)
             {
@@ -134,7 +138,8 @@ namespace KiteNiftyStrategy
         {
             if (_config == null) return;
 
-            _kite = new Kite(_config.ApiKey, Debug: false);
+            // Increasing timeout to 30 seconds as instrument list fetching can be slow
+            _kite = new Kite(_config.ApiKey, Debug: false, Timeout: 30000);
 
             // Manual login is required by Zerodha once a day
             Console.WriteLine("\n[Authentication]");
@@ -271,7 +276,6 @@ namespace KiteNiftyStrategy
             try
             {
                 var history = _kite.GetOrderHistory(orderId);
-                // In Tech.Zerodha.KiteConnect 5.x, constants are structured
                 var completedOrder = history.LastOrDefault(o => o.Status == Constants.OrderStatus.Complete);
                 return completedOrder.OrderId != null ? completedOrder.AveragePrice : 0;
             }
@@ -415,7 +419,7 @@ namespace KiteNiftyStrategy
         }
 
         /// <summary>
-        /// Automatically cancels all pending orders and closes all open positions for the account.
+        /// Automatically cancels all pending orders and closes only the strategy positions.
         /// </summary>
         private static void SquareOff()
         {
@@ -423,23 +427,26 @@ namespace KiteNiftyStrategy
 
             try
             {
-                // 1. Cancel all pending/trigger-pending orders
+                // 1. Cancel only our strategy's pending/trigger-pending orders
                 var orders = _kite.GetOrders();
-                var openOrders = orders.Where(o => o.Status == "OPEN" || o.Status == "TRIGGER PENDING");
-                foreach (var order in openOrders)
+                var ourPendingOrders = orders.Where(o =>
+                    (o.OrderId == _ceSLOrderId || o.OrderId == _peSLOrderId) &&
+                    (o.Status == "OPEN" || o.Status == "TRIGGER PENDING"));
+
+                foreach (var order in ourPendingOrders)
                 {
                     _kite.CancelOrder(order.OrderId);
-                    Console.WriteLine($"Cancelled pending order: {order.OrderId}");
+                    Console.WriteLine($"Cancelled strategy SL order: {order.OrderId} ({order.Tradingsymbol})");
                 }
 
-                // 2. Close all open positions with Market orders
+                // 2. Close only the CE and PE strategy positions
                 var positionResponse = _kite.GetPositions();
                 var netPositions = positionResponse.Net;
                 foreach (var position in netPositions)
                 {
-                    if (position.Quantity != 0)
+                    // Filter to only close the symbols we traded
+                    if ((position.TradingSymbol == _ceSymbol || position.TradingSymbol == _peSymbol) && position.Quantity != 0)
                     {
-                        // Opposite transaction to square off
                         var transactionType = position.Quantity > 0 ? Constants.Transaction.Sell : Constants.Transaction.Buy;
 
                         _kite.PlaceOrder(
@@ -450,7 +457,7 @@ namespace KiteNiftyStrategy
                             OrderType: Constants.OrderType.Market,
                             Product: position.Product
                         );
-                        Console.WriteLine($"Squared off position: {position.TradingSymbol}, Quantity: {position.Quantity}");
+                        Console.WriteLine($"Squared off strategy position: {position.TradingSymbol}, Quantity: {position.Quantity}");
                     }
                 }
             }
